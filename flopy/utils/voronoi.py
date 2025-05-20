@@ -5,6 +5,7 @@ import numpy as np
 
 from .cvfdutil import get_disv_gridprops
 from .geometry import point_in_polygon
+from .triangle import Triangle
 from .utl_import import import_optional_dependency
 
 
@@ -92,7 +93,7 @@ def sort_vertices(vlist):
     return [vlist[i] for angl, i in tlist]
 
 
-def tri2vor(tri, **kwargs):
+def tri2vor(tri: Triangle, **kwargs):
     """
     This is the workhorse for the VoronoiGrid class for creating a voronoi
     grid from a constructed and built flopy Triangle grid.
@@ -115,12 +116,9 @@ def tri2vor(tri, **kwargs):
     from scipy.spatial import Voronoi
 
     # assign local variables
-    tri_verts = tri.verts
-    tri_iverts = tri.iverts
-    tri_edge = tri.edge
+    tri_verts = tri.vertices
+    tri_edge = tri.edges
     npoints = tri_verts.shape[0]
-    ntriangles = len(tri_iverts)
-    nedges = tri_edge.shape[0]
 
     # check to make sure there are no duplicate points
     tri_verts_unique = np.unique(tri_verts, axis=0)
@@ -199,11 +197,10 @@ def tri2vor(tri, **kwargs):
     for ihole in range(nholes):
         polygon = tri._polygons[ihole + 1]
         nexterior_boundary_markers += len(polygon)
-    idx = (tri_edge["boundary_marker"] > 0) & (
-        tri_edge["boundary_marker"] <= nexterior_boundary_markers
-    )
+    idx = (tri.edge_markers > 0) & (tri.edge_markers <= nexterior_boundary_markers)
+
     inewvert = len(vor_verts)
-    for _, ip0, ip1, _ in tri_edge[idx]:
+    for ip0, ip1 in tri_edge[idx.ravel(), :]:
         midpoint = tri_verts[[ip0, ip1]].mean(axis=0)
         px, py = midpoint
         vor_verts.append((px, py))
@@ -231,9 +228,9 @@ def tri2vor(tri, **kwargs):
         iverts_cell = vor_iverts[icell]
         vor_iverts[icell] = list(get_sorted_vertices(iverts_cell, vor_verts))
 
-    # remove empty polygons/iverts, point, and line freatures
+    # remove empty polygons/triangles, point, and line freatures
     # and their associated xy centers
-    points = list(tri.verts)
+    points = list(tri.vertices)
     pop_list = []
     for icell, ivlist in enumerate(vor_iverts):
         if len(ivlist) < 3:
@@ -275,19 +272,16 @@ class VoronoiGrid:
 
     """
 
-    def __init__(self, tri, **kwargs):
-        from .triangle import Triangle
-
+    def __init__(self, tri: Triangle, **kwargs):
         if isinstance(tri, Triangle):
-            verts, iverts, points = tri2vor(tri, **kwargs)
+            vertices, triangles, points = tri2vor(tri, **kwargs)
         else:
             raise TypeError("The tri argument must be of type flopy.utils.Triangle")
         self.points = points
-        self.verts = verts
-        self.iverts = iverts
-        self.ncpl = len(iverts)
-        self.nverts = verts.shape[0]
-        return
+        self.verts = vertices
+        self.iverts = triangles
+        self.ncpl = len(triangles)
+        self.nverts = vertices.shape[0]
 
     def get_disv_gridprops(self):
         """

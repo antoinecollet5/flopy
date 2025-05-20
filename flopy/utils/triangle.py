@@ -1,12 +1,13 @@
-import os
-import subprocess
+from typing import Dict, List
 
 import matplotlib.pyplot as plt
 import numpy as np
+import numpy.typing as npt
 
 from ..mbase import resolve_exe
 from ..utils.cvfdutil import centroid_of_polygon
 from ..utils.geospatial_utils import GeoSpatialUtil
+from .utl_import import import_optional_dependency
 
 
 class Triangle:
@@ -19,9 +20,11 @@ class Triangle:
     ----------
     model_ws : str
         workspace location for creating triangle files (default is '.')
+        Deprecated.
     exe_name : str
         path and name of the triangle program. (default is triangle, which
-        means that the triangle program must be in your path)
+        means that the triangle program must be in your path).
+        Deprecated.
     maximum_area : float
         the maximum area for any triangle.  The default value is None, which
         means that the user must specify maximum areas for each region.
@@ -150,19 +153,14 @@ class Triangle:
 
         """
 
-        # provide some protection by removing existing files
-        self.clean()
-
-        # write the active domain to a file
-        fname = os.path.join(self.model_ws, f"{self.file_prefix}.0.node")
-        self._write_nodefile(fname)
-
-        # poly file
-        fname = os.path.join(self.model_ws, f"{self.file_prefix}.0.poly")
-        self._write_polyfile(fname)
+        import_optional_dependency(
+            "triangle",
+            error_message="Triangle requires triangle ().",
+        )
+        from triangle import triangulate  # python wrapper for the triangle lib (cython)
 
         # Construct the triangle command
-        cmds = [self.exe_name]
+        cmds: List[str] = []
         if self.maximum_area is not None:
             cmds.append(f"-a{self.maximum_area}")
         else:
@@ -173,29 +171,43 @@ class Triangle:
             cmds += self.additional_args
         cmds.append("-A")  # assign attributes
         cmds.append("-p")  # triangulate .poly file
-        cmds.append("-V")  # verbose
+        if verbose:
+            cmds.append("-V")  # verbose
         cmds.append("-D")  # delaunay triangles for finite volume
         cmds.append("-e")  # edge file
         cmds.append("-n")  # neighbor file
-        cmds.append(f"{self.file_prefix}.0")  # output file name
 
-        # run Triangle
-        buff = subprocess.check_output(cmds, cwd=self.model_ws)
-        buff = buff.decode()
-        if verbose:
-            print(buff)
+        t = triangulate(self._get_triangulate_input(), " ".join(cmds))
 
-        # load the results
-        self._load_results()
-        self.ncpl = self.ele.shape[0]
-        self.nvert = self.node.shape[0]
+        # vertices
+        self.vertices = t.get("vertices")
+        self.vertex_markers = t.get("vertex_markers")
+        self.edges = t.get("edges")
+        self.edge_markers = t.get("edge_markers")
+        self.neigh = t.get("neighbors")
+        self.triangles = t.get("triangles", np.array([]))
+        self.triangle_attributes = t.get("triangle_attributes", np.array([]))
+        # self.iverts = t.get("triangles", np.array([]))
+        self.segments = t.get("segments", np.array([]))
+        self.segment_markers = t.get("segment_markers", np.array([]))
 
-        # create verts and iverts
-        self.verts = self.node[["x", "y"]]
-        self.verts = np.array(self.verts.tolist(), float)
-        self.iverts = []
-        for row in self.ele:
-            self.iverts.append([row[1], row[2], row[3]])
+    @property
+    def ncpl(self) -> int:
+        return self.triangles.shape[0]
+
+    @property
+    def nvert(self) -> int:
+        return self.vertices.shape[0]
+
+    @property
+    def verts(self):
+        """Alias for retro-compatibility."""
+        return self.vertices
+
+    @property
+    def iverts(self):
+        """Alias for retro-compatibility."""
+        return self.triangles
 
     def plot(
         self,
@@ -274,7 +286,7 @@ class Triangle:
 
         """
         iedge = np.zeros((self.ncpl), dtype=int)
-        boundary_markers = np.unique(self.edge["boundary_marker"])
+        boundary_markers = np.unique(self.edge_markers)
         for ibm in boundary_markers:
             icells = self.get_edge_cells(ibm)
             iedge[icells] = ibm
@@ -302,10 +314,9 @@ class Triangle:
         """
         if ax is None:
             ax = plt.gca()
-        idx = np.asarray(self.edge["boundary_marker"] == ibm).nonzero()[0]
+        idx = np.asarray(self.edge_markers == ibm).nonzero()[0]
         for i in idx:
-            iv1 = self.edge["endpoint1"][i]
-            iv2 = self.edge["endpoint2"][i]
+            iv1, iv2 = self.edges[i]
             x1 = self.node["x"][iv1]
             x2 = self.node["x"][iv2]
             y1 = self.node["y"][iv1]
@@ -356,9 +367,9 @@ class Triangle:
         """
         if ax is None:
             ax = plt.gca()
-        for i in range(self.verts.shape[0]):
-            x = self.verts[i, 0]
-            y = self.verts[i, 1]
+        for i in range(self.nvert):
+            x = self.vertices[i, 0]
+            y = self.vertices[i, 1]
             s = i
             if onebased:
                 s += 1
@@ -429,13 +440,12 @@ class Triangle:
             y coordinates
 
         """
-        ncpl = len(self.iverts)
-        xcyc = np.empty((ncpl, 2), dtype=float)
-        for i, icell2d in enumerate(self.iverts):
+        xcyc = np.empty((self.ncpl, 2), dtype=float)
+        for i, icell2d in enumerate(self.triangles):
             points = []
             for iv in icell2d:
-                x = self.verts[iv, 0]
-                y = self.verts[iv, 1]
+                x = self.vertices[iv, 0]
+                y = self.vertices[iv, 1]
                 points.append((x, y))
             xc, yc = centroid_of_polygon(points)
             xcyc[i, 0] = xc
@@ -455,8 +465,8 @@ class Triangle:
         """
         cell2d = []
         xcyc = self.get_xcyc()
-        for i, icell2d in enumerate(self.iverts):
-            ic2dr = icell2d[::-1]
+        for i, icell2d in enumerate(self.triangles):
+            ic2dr = list(icell2d[::-1])
             cell2d.append([i, xcyc[i, 0], xcyc[i, 1], len(icell2d)] + ic2dr)
         return cell2d
 
@@ -498,7 +508,7 @@ class Triangle:
         # Create a list of cells for boundary marker ibm
         cell_list = []
         edgedict = self.edgedict
-        for n, ivlist in enumerate(self.iverts):
+        for n, ivlist in enumerate(self.triangles):
             itmp = ivlist + [ivlist[0]]
             for i in range(len(ivlist)):
                 ie = (itmp[i], itmp[i + 1])
@@ -535,7 +545,7 @@ class Triangle:
         if self.edgedict is None:
             self._create_edge_dict()
 
-        ivlist = self.iverts[n]
+        ivlist = self.triangles[n]
         itmp = ivlist + [ivlist[0]]
         d = None
         for i in range(len(ivlist)):
@@ -544,8 +554,8 @@ class Triangle:
             ie = (itmp[i], itmp[i + 1])
             if ie in self.edgedict:
                 if self.edgedict[ie] == ibm:
-                    x1, y1 = self.verts[iv1]
-                    x2, y2 = self.verts[iv2]
+                    x1, y1 = self.vertices[iv1]
+                    x2, y2 = self.vertices[iv2]
                     d = ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5
                     return d
         return d
@@ -560,200 +570,48 @@ class Triangle:
         attribute_array : ndarray
 
         """
-        return self.ele["attribute"]
-
-    def clean(self):
-        """
-        Remove the input and output files created by this class and by the
-        Triangle program
-
-        Returns
-        -------
-        None
-
-        """
-        # remove input files
-        for ext in ["poly", "node"]:
-            fname = os.path.join(self.model_ws, f"{self.file_prefix}0.{ext}")
-            if os.path.isfile(fname):
-                os.remove(fname)
-                if os.path.isfile(fname):
-                    print(f"Could not remove: {fname}")
-        # remove output files
-        for ext in ["poly", "ele", "node", "neigh", "edge"]:
-            fname = os.path.join(self.model_ws, f"{self.file_prefix}1.{ext}")
-            if os.path.isfile(fname):
-                os.remove(fname)
-                if os.path.isfile(fname):
-                    print(f"Could not remove: {fname}")
+        return self.triangle_attributes
 
     def _initialize_vars(self):
         self.file_prefix = "_triangle"
-        self.ncpl = 0
-        self.nvert = 0
         self._active_domain = None
         self._polygons = []
         self._holes = []
         self._regions = []
-        self.verts = None
-        self.iverts = None
+        self.vertices = np.array([])
+        self.triangles = np.array([])
         self.edgedict = None
 
-    def _load_results(self):
-        # node file
-        ext = "node"
-        dt = [("ivert", int), ("x", float), ("y", float)]
-        fname = os.path.join(self.model_ws, f"{self.file_prefix}.1.{ext}")
-        setattr(self, ext, None)
-        with open(fname, "r") as f:
-            line = f.readline()
-            f.close()
-            ll = line.strip().split()
-            nvert = int(ll[0])
-            ndim = int(ll[1])
-            assert ndim == 2, "Dimensions in node file is not 2"
-            iattribute = int(ll[2])
-            if iattribute == 1:
-                dt.append(("attribute", int))
-            ibm = int(ll[3])
-            if ibm == 1:
-                dt.append(("boundary_marker", int))
-            a = np.loadtxt(fname, skiprows=1, comments="#", dtype=dt)
-            assert a.shape[0] == nvert
-            setattr(self, ext, a)
-
-        # ele file
-        ext = "ele"
-        dt = [("icell", int), ("iv1", int), ("iv2", int), ("iv3", int)]
-        fname = os.path.join(self.model_ws, f"{self.file_prefix}.1.{ext}")
-        setattr(self, ext, None)
-        with open(fname, "r") as f:
-            line = f.readline()
-            f.close()
-            ll = line.strip().split()
-            ncells = int(ll[0])
-            npt = int(ll[1])
-            assert npt == 3, "Nodes per triangle in ele file is not 3"
-            iattribute = int(ll[2])
-            if iattribute == 1:
-                dt.append(("attribute", int))
-            a = np.loadtxt(fname, skiprows=1, comments="#", dtype=dt)
-            assert a.shape[0] == ncells
-            setattr(self, ext, a)
-
-        # edge file
-        ext = "edge"
-        dt = [("iedge", int), ("endpoint1", int), ("endpoint2", int)]
-        fname = os.path.join(self.model_ws, f"{self.file_prefix}.1.{ext}")
-        setattr(self, ext, None)
-        with open(fname, "r") as f:
-            line = f.readline()
-            f.close()
-            ll = line.strip().split()
-            nedges = int(ll[0])
-            ibm = int(ll[1])
-            if ibm == 1:
-                dt.append(("boundary_marker", int))
-            a = np.loadtxt(fname, skiprows=1, comments="#", dtype=dt)
-            assert a.shape[0] == nedges
-            setattr(self, ext, a)
-
-        # neighbor file
-        ext = "neigh"
-        dt = [
-            ("icell", int),
-            ("neighbor1", int),
-            ("neighbor2", int),
-            ("neighbor3", int),
-        ]
-        fname = os.path.join(self.model_ws, f"{self.file_prefix}.1.{ext}")
-        setattr(self, ext, None)
-        with open(fname, "r") as f:
-            line = f.readline()
-            f.close()
-            ll = line.strip().split()
-            ncells = int(ll[0])
-            nnpt = int(ll[1])
-            assert nnpt == 3, "Neighbors per triangle in neigh file is not 3"
-            a = np.loadtxt(fname, skiprows=1, comments="#", dtype=dt)
-            assert a.shape[0] == ncells
-            setattr(self, ext, a)
-
-    def _write_nodefile(self, fname):
-        f = open(fname, "w")
+    def _get_triangulate_input(self) -> Dict[str, npt.NDArray[np.float64]]:
         nvert = 0
         for p in self._polygons:
             nvert += len(p)
         if self._nodes is not None:
             nvert += self._nodes.shape[0]
-        s = f"{nvert} 2 0 0\n"
-        f.write(s)
-        ip = 0
+        nodes = []
+        segs = []
+        tot_index = 0
         for p in self._polygons:
-            for vertex in p:
-                s = f"{ip} {vertex[0]} {vertex[1]}\n"
-                f.write(s)
-                ip += 1
+            n_seg_in_poly = len(p)
+            for vi, vertex in enumerate(p):
+                nodes.append([vertex[0], vertex[1]])
+                segs.append((vi + tot_index, (vi + 1) % n_seg_in_poly + tot_index))
+            tot_index += n_seg_in_poly
+
         if self._nodes is not None:
             for i in range(self._nodes.shape[0]):
-                s = f"{ip} {self._nodes[i, 0]} {self._nodes[i, 1]}\n"
-                f.write(s)
-                ip += 1
-        f.close()
+                nodes.append([self._nodes[i, 0], self._nodes[i, 1]])
+        res = {"vertices": np.array(nodes), "segments": np.array(segs)}
 
-    def _write_polyfile(self, fname):
-        f = open(fname, "w")
+        if len(self._holes) != 0:
+            res["holes"] = np.array(self._holes)
+        if len(self._regions) != 0:
+            res["regions"] = self._get_regions()
 
-        # vertices, write zero to indicate read from node file
-        s = "0 0 0 0\n"
-        f.write(s)
+        return res
 
-        # segments
-        nseg = 0
-        for p in self._polygons:
-            nseg += len(p)
-        bm = 1
-        s = f"{nseg} {bm}\n"
-        f.write(s)
-
-        iseg = 0
-        ipstart = 0
-        for p in self._polygons:
-            nseg = len(p)
-            for i in range(nseg):
-                ep1 = i
-                ep2 = i + 1
-                if ep2 > nseg - 1:
-                    ep2 = 0
-                ep1 += ipstart
-                ep2 += ipstart
-                s = f"{iseg} {ep1} {ep2} {iseg + 1}\n"
-                f.write(s)
-                iseg += 1
-            ipstart += len(p)
-
-        # holes
-        nholes = len(self._holes)
-        s = f"{nholes}\n"
-        f.write(s)
-        for i, hole in enumerate(self._holes):
-            s = f"{i} {hole[0]} {hole[1]}\n"
-            f.write(s)
-
-        # regions
-        nregions = len(self._regions)
-        s = f"{nregions}\n"
-        f.write(s)
-        for i, region in enumerate(self._regions):
-            pt = region[0]
-            attribute = region[1]
-            maxarea = region[2]
-            if maxarea is None:
-                maxarea = -1.0
-            s = f"{i} {pt[0]} {pt[1]} {attribute} {maxarea}\n"
-            f.write(s)
-
-        f.close()
+    def _get_regions(self):
+        return np.array([[*_[0], _[1], _[2]] for _ in self._regions])
 
     def _create_edge_dict(self):
         """
@@ -761,7 +619,7 @@ class Triangle:
 
         """
         edgedict = {}
-        for _, iv1, iv2, iseg in self.edge:
+        for iv1, iv2, iseg in (self.edges, self.edge_markers):
             if iseg != 0:
                 edgedict[(iv1, iv2)] = iseg
                 edgedict[(iv2, iv1)] = iseg
