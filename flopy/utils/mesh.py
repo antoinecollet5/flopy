@@ -110,6 +110,59 @@ def get_polyhedron_connectivity(
     return polyhedron_connectivity
 
 
+# @numba.jit(nopython=True)
+def update_cells(
+    cells_def_arr: npt.NDArray[int],
+    idx: int,
+    bot_face_pts_id: Sequence[int],
+    top_face_pts_id: Sequence[int],
+) -> int:
+
+    # Number of points composing the bot and top faces (it should be the same)
+    n_pts_2d = len(top_face_pts_id)
+
+    # Add NItems
+    cells_def_arr[idx] = 1 + (n_pts_2d + 1) * 2 + n_pts_2d * 5
+
+    # Add the number of faces
+    idx += 1  # update idx
+    cells_def_arr[idx] = 2 + n_pts_2d  # number of faces
+
+    # Add top face
+    idx += 1  # update idx
+    cells_def_arr[idx] = n_pts_2d
+    cells_def_arr[idx + 1 : idx + 1 + n_pts_2d] = top_face_pts_id
+    # update idx
+    idx += n_pts_2d
+
+    # Add side faces
+    for n in range(n_pts_2d - 1):
+        cells_def_arr[idx + 1] = 4
+        cells_def_arr[idx + 2] = top_face_pts_id[n]
+        cells_def_arr[idx + 3] = top_face_pts_id[n + 1]
+        cells_def_arr[idx + 4] = bot_face_pts_id[n + 1]
+        cells_def_arr[idx + 5] = bot_face_pts_id[n]
+        idx += 5
+
+    # last face
+    cells_def_arr[idx + 1] = 4
+    cells_def_arr[idx + 2] = top_face_pts_id[n_pts_2d - 1]
+    cells_def_arr[idx + 3] = top_face_pts_id[0]
+    cells_def_arr[idx + 4] = bot_face_pts_id[0]
+    cells_def_arr[idx + 5] = bot_face_pts_id[n_pts_2d - 1]
+    idx += 5
+
+    # Add bottom face
+    # Add top face
+    idx += 1
+    cells_def_arr[idx] = n_pts_2d
+    cells_def_arr[idx + 1 : idx + 1 + n_pts_2d] = bot_face_pts_id
+    # update idx
+    idx += n_pts_2d + 1
+
+    return idx
+
+
 def pv_extrude(
     surfmesh: pv.UnstructuredGrid,
     thickness: Iterable[float],
@@ -137,6 +190,16 @@ def pv_extrude(
     )
     import vtk
 
+    _update_cells = update_cells
+    if is_use_numba:
+        import_optional_dependency(
+            "numba",
+            error_message="pv_extrude with `is_use_numba` True requires numba installed.",
+        )
+        import numba
+
+        _update_cells = numba.jit(update_cells)
+
     surfmesh = surfmesh.compute_cell_sizes(length=False, area=True, volume=False)
     area = surfmesh["Area"]
     volume = list()
@@ -150,12 +213,12 @@ def pv_extrude(
         7: vtk.VTK_POLYHEDRON,
     }
 
-    nlayer = np.size(thickness)
-    points = np.tile(surfmesh.points, (nlayer + 1, 1))
+    nlayers: int = np.size(thickness)
+    points = np.tile(surfmesh.points, (nlayers + 1, 1))
     nc = surfmesh.number_of_points
 
     # Definition of the z-coordinates for each layer
-    for i in range(nlayer):
+    for i in range(nlayers):
         points[((i + 1) * nc) : (i + 2) * nc, 2] = (
             points[i * nc : ((i + 1) * nc), 2] + thickness[i]
         )
@@ -168,45 +231,56 @@ def pv_extrude(
         ncells += get_ncell4poly(surfmesh.cells[ind])
         ind = ind + 1 + npoints
 
-    # create the cell vector
-    cells_def_arr = np.zeros(ncells * nlayer, dtype=np.int64)
-
-    cells = list()
-    celltypes = list()
-    layer = list()
+    # pre-allocate the arrays => more efficient than list and compatible with numba
+    # for large grids with millions of cells.
+    cells = np.zeros(ncells * nlayers, dtype=np.int64)
+    celltypes = np.zeros(surfmesh.number_of_cells * nlayers, dtype=np.uint8)
+    layers = np.zeros(surfmesh.number_of_cells * nlayers, dtype=np.uint8)
 
     ind = 0
+    ncell = 0
+    cda_idx = 0
     for i in range(surfmesh.number_of_cells):
         npoints = surfmesh.cells[ind]
         edges = surfmesh.cells[ind + 1 : ind + 1 + npoints]
-        ind = ind + 1 + npoints
 
-        # _vtk.VTK_POLYHEDRON
-        for j in range(nlayer):
-            celltypes.append(ctype.setdefault(npoints, vtk.VTK_POLYHEDRON))
-
+        # iterate the layers
+        for j in range(nlayers):
+            # update the type of cell
+            # celltypes[ncell] = ctype.setdefault(npoints, vtk.VTK_POLYHEDRON)
+            celltypes[ncell] = ctype.setdefault(npoints, vtk.VTK_POLYHEDRON)
             # celltype between 3 and 6
-            if celltypes[-1] != vtk.VTK_POLYHEDRON:
-                cells.append(2 * npoints)  # number of points
-                cells.extend(edges + j * nc)  # lower side
-                cells.extend(edges + (j + 1) * nc)  # upper side
+            if celltypes[ncell] != vtk.VTK_POLYHEDRON:
+                # update number of points
+                cells[cda_idx] = 2 * npoints
+                # update lower side
+                cells[cda_idx + 1 : cda_idx + 1 + npoints] = edges + j * nc
+                # update upper side
+                cells[cda_idx + 1 + npoints : cda_idx + 1 + 2 * npoints] = (
+                    edges + (j + 1) * nc
+                )
+                # update the cells comptor
+                cda_idx += 1 + 2 * npoints
             # celltype not covered by "classic" objects => use of polyhedron
             # which is more tricky to define because each face must be
             # defined individually.
             else:
-                cells += get_polyhedron_connectivity(
-                    edges + j * nc, edges + (j + 1) * nc
+                cda_idx = _update_cells(
+                    cells, cda_idx, edges + j * nc, edges + (j + 1) * nc
                 )
-
             volume.append(area[i] * thickness[j])
-            layer.append(j)
 
-    assert cells_def_arr.size == len(cells)
+            # update the layer for the current cell and then the number of cells
+            layers[ncell] = j
+            ncell += 1
 
-    mesh = pv.UnstructuredGrid(cells, np.array(celltypes), points)
+        # update comptor
+        ind += 1 + npoints
+
+    mesh = pv.UnstructuredGrid(cells, celltypes, points)
 
     mesh["Volume"] = volume
-    mesh["Layer"] = layer
+    mesh["Layer"] = layers
 
     # add voronoi points
     if "Cell centers" in surfmesh.cell_data.keys():
