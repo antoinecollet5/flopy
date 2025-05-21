@@ -2,9 +2,11 @@ from collections.abc import Iterator
 from math import sqrt
 
 import numpy as np
+import pyvista as pv
 
 from .cvfdutil import get_disv_gridprops
 from .geometry import point_in_polygon
+from .mesh import add_dimension, create_unstructured_mesh
 from .triangle import Triangle
 from .utl_import import import_optional_dependency
 
@@ -402,3 +404,20 @@ class VoronoiGrid:
         if plot_title:
             ax.set_title(f"ncells: {self.ncpl}; nverts: {self.nverts}")
         return ax
+
+    def to_vtk(self):
+        return create_unstructured_mesh(add_dimension(self.verts, "z"), self.iverts)
+
+    def to_pyvista(self):
+        import_optional_dependency(
+            "pyvista",
+            error_message="VoronoiGrid.to_pyvista requires pyvista.",
+        )
+        import pyvista as pv
+
+        vtkmesh = self.to_vtk()
+        pvmesh = pv.UnstructuredGrid(vtkmesh)
+        # Add the voronoi cell centers
+        pvmesh.cell_data.set_array(add_dimension(self.points, "z"), "Cell centers")
+        pvmesh.compute_cell_sizes(length=False, area=True, volume=False)
+        return pvmesh
