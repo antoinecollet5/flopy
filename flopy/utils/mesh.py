@@ -110,7 +110,6 @@ def get_polyhedron_connectivity(
     return polyhedron_connectivity
 
 
-# @numba.jit(nopython=True)
 def update_cells(
     cells_def_arr: npt.NDArray[int],
     idx: int,
@@ -198,7 +197,7 @@ def pv_extrude(
         )
         import numba
 
-        _update_cells = numba.jit(update_cells)
+        _update_cells = numba.njit(update_cells, cache=True)
 
     surfmesh = surfmesh.compute_cell_sizes(length=False, area=True, volume=False)
     area = surfmesh["Area"]
@@ -292,16 +291,24 @@ def pv_extrude(
             repeats=len(thickness),
             axis=2,
         )
-        prev_th = 0.0
-        for i, th in enumerate(thickness):
-            # update z
-            cc[:, 2, i] = cc[:, 2, max(i, 0)] + prev_th / 2.0 + th / 2.0
-            prev_th = th
 
-            # Add the voronoi cell centers
-            mesh.cell_data.set_array(
-                cc.transpose(0, 2, 1).reshape(ncells * len(thickness), 3),
-                "Cell centers",
-            )
+        # At this point cc has shape (n_cell in 2d, 3, len(thickness))
+        total_th: float = 0.0
+        for i, th in enumerate(thickness):
+            # the first index is treated after => otherwise it modies cc[:, 2, 0] inplace
+            if i == 0:
+                total_th += th
+                continue
+            # update z
+            # print(total_th + th / 2.0)
+            cc[:, 2, i] += cc[:, 2, 0] + total_th + th / 2.0
+            total_th += th
+        # handle index 0
+        cc[:, 2, 0] += thickness[0] / 2.0
+
+        # Add the voronoi cell centers
+        mesh.cell_data["Cell centers"] = cc.transpose(0, 2, 1).reshape(
+            ncells * len(thickness), 3
+        )
 
     return mesh
