@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
 
-from ..mbase import resolve_exe
 from ..utils.cvfdutil import centroid_of_polygon
 from ..utils.geospatial_utils import GeoSpatialUtil
 from .utl_import import import_optional_dependency
@@ -53,8 +52,6 @@ class Triangle:
         nodes=None,
         additional_args=None,
     ):
-        self.model_ws = model_ws
-        self.exe_name = resolve_exe(exe_name)
         self.angle = angle
         self.maximum_area = maximum_area
         self._nodes = nodes
