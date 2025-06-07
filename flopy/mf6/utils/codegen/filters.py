@@ -27,7 +27,10 @@ def _get_vars(d: dict) -> dict[str, dict]:
             return (v, False)
         return default_enter(p, k, v)
 
-    remap(d, enter=enter, visit=visit)
+    dd = d.copy()
+    del dd["legacy_dfn"]
+    del dd["legacy_meta"]
+    remap(dd, enter=enter, visit=visit)
     return vars_
 
 
@@ -347,20 +350,18 @@ class Filters:
                     meta_.append(" ".join(s))
             return meta_
 
-        with open(dfn_dir / "common.dfn") as common_f, \
-                open(dfn_dir / dfn_file_name) as f:
-            common, _ = Dfn._load_v1_flat(common_f)
-            legacy_dfn, metadata = Dfn._load_v1_flat(f, common=common)
-            legacy_dfn = _dfn(legacy_dfn, _filter_metadata(metadata))
-            if component_base == "MFPackage":
-                attrs.extend(
-                    [
-                        f"package_abbr = '{Filters.package_abbr(component_name)}'",
-                        f"_package_type = '{component_name[1]}'",
-                        f"dfn_file_name = '{dfn_file_name}'",
-                        f"dfn = {pformat(legacy_dfn, indent=10, width=sys.maxsize)}"
-                    ]
-                )
+        legacy_dfn = dfn.get("legacy_dfn", {})
+        legacy_meta = dfn.get("legacy_meta", [])
+        legacy_dfn = _dfn(legacy_dfn, _filter_metadata(legacy_meta))
+        if component_base == "MFPackage":
+            attrs.extend(
+                [
+                    f"package_abbr = '{Filters.package_abbr(component_name)}'",
+                    f"_package_type = '{component_name[1]}'",
+                    f"dfn_file_name = '{dfn_file_name}'",
+                    f"dfn = {pformat(legacy_dfn, indent=10, width=sys.maxsize)}"
+                ]
+            )
 
         return attrs
     

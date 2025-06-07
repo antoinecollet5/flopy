@@ -2110,14 +2110,22 @@ class MFSimulationStructure:
 
     def tag_read_as_arrays(self):
         for key, package_struct in self.package_struct_objs.items():
-            if package_struct.get_data_structure(('options', 'readasarrays')):
+            if (
+                package_struct.get_data_structure(('options', 'readasarrays'))
+                or package_struct.get_data_structure(('options', 'readarraylayer'))
+                or package_struct.get_data_structure(('options', 'readarraygrid'))
+            ):
                 package_struct.read_as_arrays = True
         for model_key, model_struct in self.model_struct_objs.items():
             for (
                 key,
                 package_struct,
             ) in model_struct.package_struct_objs.items():
-                if package_struct.get_data_structure(('options', 'readasarrays')):
+                if (
+                    package_struct.get_data_structure(('options', 'readasarrays'))
+                    or package_struct.get_data_structure(('options', 'readarraylayer'))
+                    or package_struct.get_data_structure(('options', 'readarraygrid'))
+                ):
                     package_struct.read_as_arrays = True
 
 

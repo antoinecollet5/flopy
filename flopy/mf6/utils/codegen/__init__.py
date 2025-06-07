@@ -68,7 +68,7 @@ def make_targets(dfn, outdir: PathLike, verbose: bool = False):
     """Generate Python source file(s) from the given input definition."""
 
     env = _get_template_env()
-    outdir = Path(outdir).expanduser().absolute()
+    outdir = Path(outdir).expanduser().resolve().absolute()
 
     # import here instead of module so we don't
     # expect optional deps at module init time
@@ -87,7 +87,7 @@ def make_targets(dfn, outdir: PathLike, verbose: bool = False):
             return "package.py.jinja"
         else:
             raise NotImplementedError(f"Unknown base class: {base}")
-        
+
     for component in ComponentDescriptor.from_dfn(dfn):
         component_name = component["name"]
         target_path = outdir / f"mf{Filters.title(component_name)}.py"
@@ -98,14 +98,40 @@ def make_targets(dfn, outdir: PathLike, verbose: bool = False):
                 print(f"Wrote {target_path}")
 
 
-def make_all(dfndir: Path, outdir: PathLike, verbose: bool = False, version: int = 1):
+def make_all(
+    dfndir: PathLike,
+    outdir: PathLike,
+    verbose: bool = False,
+    version: int = 1,
+    legacydir: PathLike | None = None,
+):
     """Generate Python source files from the DFN files in the given location."""
 
     # import here instead of module so we don't
     # expect optional deps at module init time
     from flopy.mf6.utils.dfn import Dfn
 
+    dfndir = Path(dfndir).expanduser().resolve().absolute()
     dfns = Dfn.load_all(dfndir, version=version)
+
+    # below is a temporary workaround to attach the legacy DFN
+    # representation to generated classes. at the moment it is
+    # parsed haphazardly throughout the mf6 module. TODO: when
+    # the legacy DFN is no longer needed at runtime, remove.
+    if version == 2:
+        assert legacydir is not None, (
+            "legacydir must be provided for version 2 DFNs"
+        )
+        legacydir = Path(legacydir).expanduser().resolve().absolute()
+        with open(legacydir / "common.dfn") as cf:
+            common, _ = Dfn._load_v1_flat(cf)
+            for dfn in dfns.values():
+                dfn_name = dfn["name"]
+                with open(legacydir / f"{dfn_name}.dfn") as df:
+                    legacy_dfn, legacy_meta = Dfn._load_v1_flat(df, common=common)
+                    dfn["legacy_dfn"] = legacy_dfn
+                    dfn["legacy_meta"] = legacy_meta
+
     make_init(dfns, outdir, verbose)
     for dfn in dfns.values():
         make_targets(dfn, outdir, verbose)
