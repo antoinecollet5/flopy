@@ -1,14 +1,37 @@
 import calendar
-import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 
 import numpy as np
 import pandas as pd
+from numpy.typing import ArrayLike, NDArray
+from pandas.api.types import is_scalar
 
 
+def _maybe_collect(l):
+    return l if is_scalar(l) else list(l)
+
+
+@dataclass
 class ModelTime:
     """
-    Class for MODFLOW simulation time
+    Simulation time discretization.
+    """
+
+    _perlen: NDArray[np.floating] = field(init=False)
+    _nstp: NDArray[np.integer] = field(init=False)
+    _tsmult: NDArray[np.floating] = field(init=False)
+    _time_units: int | str = field(init=False)
+    _start_datetime: datetime = field(init=False)
+    _steady_state: NDArray[np.bool_] | None = field(init=False)
+
+    _totim_dict: dict = field(init=False, repr=False, compare=False)
+    _pertim_dict: dict = field(init=False, repr=False, compare=False)
+    _datetime_dict: dict = field(init=False, repr=False, compare=False)
+    _str_format: str = field(init=False, repr=False, compare=False)
+
+    """
 
     Parameters
     ----------
@@ -16,7 +39,7 @@ class ModelTime:
         list or numpy array of stress-period lengths
     nstp : ArrayLike[int]
         list or numpy array of number of time-steps per stress period
-    tsmult : list, np.ndarray
+    tsmult : ArrayLike[float] or None
         list or numpy array of timestep mult information
     time_units : ArrayLike[float] or None
         string or pre-mf6 integer representation (ITMUNI) of time units
@@ -31,130 +54,116 @@ class ModelTime:
 
     def __init__(
         self,
-        perlen,
-        nstp,
-        tsmult=None,
-        time_units=None,
-        start_datetime=None,
-        steady_state=None,
+        perlen: ArrayLike,
+        nstp: ArrayLike,
+        tsmult: ArrayLike = None,
+        time_units: int | str | None = None,
+        start_datetime: str | datetime | np.datetime64 | pd.Timestamp | None = None,
+        steady_state: ArrayLike | None = None,
     ):
-        nrecs = len(perlen)
-        if tsmult is None:
-            tsmult = np.full((nrecs,), 1)
-
-        if nrecs != len(nstp):
-            raise ValueError("perlen and nstp inputs must have the same dimension")
-
-        if len(tsmult) != len(nstp):
-            raise ValueError("tsmult and nstp inputs must have the same dimension")
-
-        self._perlen = np.array(list(perlen))
-        self._nstp = np.array(list(nstp))
-        self._tsmult = np.array(list(tsmult))
-        self._time_units = self.parse_timeunits(time_units)
-        self._start_datetime = ModelTime.parse_datetime(start_datetime)
-        self._steady_state = steady_state
         self._totim_dict = {}
         self._pertim_dict = {}
         self._datetime_dict = {}
-        self.__str_format = "%Y-%m-%dt%H:%M:%S"
+        self._str_format = "%Y-%m-%dT%H:%M:%S"
+        self._perlen = np.atleast_1d(_maybe_collect(perlen)).astype(float)
+        self._nstp = np.atleast_1d(_maybe_collect(nstp)).astype(int)
+        if tsmult is None:
+            tsmult = np.full((self._perlen.shape[0],), 1.0)
+        self._tsmult = np.atleast_1d(_maybe_collect(tsmult)).astype(float)
+        if len(self._perlen) != len(self._nstp) or len(self._perlen) != len(
+            self._tsmult
+        ):
+            raise ValueError("perlen, nstp and tsmult must have the same length")
+        if steady_state is None:
+            self._steady_state = None
+        else:
+            self._steady_state = np.atleast_1d(_maybe_collect(steady_state)).astype(
+                bool
+            )
+            if len(self._steady_state) != len(self._perlen):
+                raise ValueError(
+                    "perlen, nstp, tsmult and steady_state must have the same length"
+                )
+        self.time_units = time_units
+        self.start_datetime = start_datetime
+
+    def __eq__(self, other):
+        if not isinstance(other, ModelTime):
+            return False
+
+        return (
+            np.array_equal(self.perlen, other.perlen)
+            and np.array_equal(self.nstp, other.nstp)
+            and np.array_equal(self.tsmult, other.tsmult)
+            and self.time_units == other.time_units
+            and self.start_datetime == other.start_datetime
+            and np.array_equal(self.steady_state, other.steady_state)
+        )
 
     @property
-    def time_units(self):
-        """
-        Returns a normalized string representation of the time units
-        """
+    def perlen(self) -> NDArray[np.floating]:
+        """Stress period lengths."""
+        return self._perlen
+
+    @property
+    def nstp(self) -> NDArray[np.integer]:
+        """Number of time steps per stress period."""
+        return self._nstp
+
+    @property
+    def tsmult(self) -> NDArray[np.floating]:
+        """ModelTime step multipliers."""
+        return self._tsmult
+
+    @property
+    def time_units(self) -> str:
+        """ModelTime units."""
         return self._time_units
 
     @time_units.setter
-    def time_units(self, units):
-        """
-        Method to reset the time units of the ModelTime class
-
-        Parameters
-        ----------
-        units : str or int
-            string or pre-mf6 integer representation (ITMUNI) of time units
-
-        """
-        units = self.parse_timeunits(units)
-        self._time_units = units
+    def time_units(self, value: int | str | None):
+        self._time_units = self.parse_timeunits(value)
+        self._datetime_dict = {}  # clear cache when time units change
 
     @property
-    def start_datetime(self):
-        """
-        Returns a datetime.datetime object of the model start time
-        """
+    def start_datetime(self) -> datetime:
+        """Start datetime."""
         return self._start_datetime
 
     @start_datetime.setter
-    def start_datetime(self, datetime_obj):
-        """
-        Property setter method to reset the start datetime of the ModelTime class
-
-        Parameters
-        ----------
-        datetime_obj : various objects
-            user-supplied datetime representation. Please see the
-            ModelTime.parse_datetime documentation for a list
-            of the supported representation types
-
-        """
-        start_dt = self.parse_datetime(datetime_obj)
-        self._start_datetime = start_dt
+    def start_datetime(
+        self, value: str | datetime | np.datetime64 | pd.Timestamp | None
+    ):
+        self._start_datetime = ModelTime.parse_datetime(value)
+        self._datetime_dict = {}  # clear cache when start datetime changes
 
     @property
-    def perlen(self):
-        """
-        Returns a list or array of stress-period lengths
-
-        """
-        return self._perlen.copy()
+    def steady_state(self) -> NDArray[np.bool_] | None:
+        """Steady state flags."""
+        return self._steady_state
 
     @property
-    def nper(self):
+    def nper(self) -> int:
         """
-        Returns the number of stress periods
+        The number of stress periods in the simulation.
         """
-        return len(self._perlen)
+        return len(self.perlen)
 
     @property
-    def nstp(self):
+    def perioddata(self) -> list[tuple[float, int, float]]:
         """
-        Returns a list or array of number of time steps per stress period
-        """
-        return self._nstp.copy()
-
-    @property
-    def tsmult(self):
-        """
-        Returns the time step multiplier value for each stress period
-
-        """
-        return self._tsmult.copy()
-
-    @property
-    def perioddata(self):
-        """
-        Returns a tuple of period data for the MF6 TDIS package containing records
-        of [(perlen, nstp, tsmult), ....] for each stress period
+        Period data for the MF6 TDIS package. Returns a list of
+        tuples (perlen, nstp, tsmult), 1 for each stress period.
         """
         return [
             (per, self.nstp[ix], self.tsmult[ix]) for ix, per in enumerate(self.perlen)
         ]
 
     @property
-    def steady_state(self):
+    def pertim(self) -> list[float]:
         """
-        Returns a boolean that indicates either steady-state or transient stress period
-
-        """
-        return self._steady_state
-
-    @property
-    def pertim(self):
-        """
-        Returns a list of pertim values at the end of each time-step
+        Period time corresponding to the end of each time-step. This is the time
+        elapsed since the start of stress period.
         """
         if not self._totim_dict:
             self._set_totim_dict()
@@ -162,10 +171,10 @@ class ModelTime:
         return list(self._pertim_dict.values())
 
     @property
-    def totim(self):
+    def totim(self) -> list[float]:
         """
-        Returns a list of totim values at the end of each time-step
-
+        Simulation time corresponding to the end of each time-step. This is the
+        time elapsed since the start of the simulation.
         """
         if not self._totim_dict:
             self._set_totim_dict()
@@ -173,31 +182,30 @@ class ModelTime:
         return list(self._totim_dict.values())
 
     @property
-    def datetimes(self):
+    def datetimes(self) -> list[datetime]:
         """
-        Returns a list of datetime objects for all time steps
+        Timestamp corresponding to the end of each time-step.
         """
+
         if not self._datetime_dict:
             self._set_datetime_dict()
 
         return list(self._datetime_dict.values())
 
     @property
-    def kper_kstp(self):
+    def kper_kstp(self) -> list[tuple[int, int]]:
         """
-        Returns a list of kper, kstp tuples that correspond to totim
+        Stress period and time step index corresponding to each time step.
+        """
 
-        """
         if not self._totim_dict:
             self._set_totim_dict()
         return list(self._totim_dict.keys())
 
     @property
-    def tslen(self):
-        """
-        Method to get a list of time step lengths for the entire model period
+    def tslen(self) -> list[float]:
+        """Duration of each time step."""
 
-        """
         n = 0
         tslen = []
         totim = self.totim
@@ -209,11 +217,13 @@ class ModelTime:
                     tslen.append(totim[n] - totim[n - 1])
                 n += 1
 
-        return np.array(tslen)
+        return tslen
 
-    def get_datetime_string(self, datetime_obj):
+    def get_datetime_string(
+        self, datetime_obj: str | datetime | np.datetime64 | pd.Timestamp
+    ) -> str:
         """
-        Method to get a standardized ISO 8601 compliant datetime string
+        Get a standardized ISO 8601 compliant datetime string.
 
         Parameters
         ----------
@@ -222,19 +232,19 @@ class ModelTime:
             ModelTime.parse_datetime documentation for a list
             of the supported representation types
 
+        Returns
+        -------
+            str: ISO 8601 compliant datetime string
         """
+
         dt = ModelTime.parse_datetime(datetime_obj)
         return dt.strftime("%Y-%m-%dT%H:%M:%S")
 
-    def _set_totim_dict(self):
+    def _set_totim_dict(self) -> None:
         """
-        Method to setup a dictionary of (kper, kstp): totim that is used
-        by multiple methods
+        Set up a dictionary of (kper, kstp): totim. Internal use only.
+        """
 
-        Returns
-        -------
-            None
-        """
         delt = []
         per_stp = []
         pertim = []
@@ -262,15 +272,11 @@ class ModelTime:
         self._totim_dict = {ps: totim[i] for i, ps in enumerate(per_stp)}
         self._pertim_dict = {ps: pertim[i] for i, ps in enumerate(per_stp)}
 
-    def _set_datetime_dict(self):
+    def _set_datetime_dict(self) -> None:
         """
-        Method to setup a dictionary of (kper, kstp): datetime.datetime
-        that is used by multiple methods
+        Set up a dictionary of (kper, kstp): datetime. Internal use only.
+        """
 
-        Returns
-        -------
-            None
-        """
         if not self._totim_dict:
             self._set_totim_dict()
 
@@ -289,9 +295,9 @@ class ModelTime:
                     ndays = 366
 
                 days = ndays * (totim - years)
-                day_td = datetime.timedelta(days=days)
+                day_td = timedelta(days=days)
 
-                dt = datetime.datetime(
+                dt = datetime(
                     year,
                     self.start_datetime.month,
                     self.start_datetime.day,
@@ -304,14 +310,14 @@ class ModelTime:
 
             else:
                 kwargs = {self.time_units: totim}
-                dt = self.start_datetime + datetime.timedelta(**kwargs)
+                dt = self.start_datetime + timedelta(**kwargs)
 
             dt_dict[ps] = dt
 
         self._datetime_dict = dt_dict
 
     @staticmethod
-    def parse_timeunits(units):
+    def parse_timeunits(units: int | str | None) -> str:
         """
         Method to get a normalized time unit string from user input. User
         input can be either a string representation or ITMUNI integer. String
@@ -369,7 +375,7 @@ class ModelTime:
         return valid_unit
 
     @staticmethod
-    def _get_datetime_string_format(str_datetime):
+    def _get_datetime_string_format(str_datetime: str) -> str:
         """
         Method to parse a limited number string representations of datetime
         formats. Currently supported string formats for date time combinations
@@ -384,7 +390,7 @@ class ModelTime:
 
         Returns
         -------
-            datetime.datetime object
+            datetime object
         """
         str_datetime = str_datetime.strip().lower()
         if "/" in str_datetime:
@@ -427,12 +433,14 @@ class ModelTime:
         return str_rep
 
     @staticmethod
-    def parse_datetime(datetime_obj):
+    def parse_datetime(
+        datetime_obj: str | datetime | np.datetime64 | pd.Timestamp | None,
+    ) -> datetime:
         """
-        Method to create a datetime.datetime object from a variety of user
+        Method to create a datetime object from a variety of user
         inputs including the following:
 
-        datetime.datetime objects
+        datetime objects
         numpy.datetime64 objects
         pandas.Timestamp objects
         string objects
@@ -445,7 +453,7 @@ class ModelTime:
         '2024/11/12'
         '2024-11-12'
 
-        Time can also be represented in the string object. Example formats
+        ModelTime can also be represented in the string object. Example formats
         representing 2:31 pm on November 12th, 2024 are as follows:
 
         '2024-11-12T14:31:00'
@@ -464,21 +472,21 @@ class ModelTime:
 
         Returns
         -------
-            datetime.datetime object
+            datetime object
         """
         if datetime_obj is None:
-            datetime_obj = datetime.datetime(1970, 1, 1)  # unix time zero
+            datetime_obj = datetime(1970, 1, 1)  # unix time zero
         elif isinstance(datetime_obj, np.datetime64):
-            unix_time_0 = datetime.datetime(1970, 1, 1)
+            unix_time_0 = datetime(1970, 1, 1)
             ts = (datetime_obj - np.datetime64(unix_time_0)) / np.timedelta64(1, "s")
-            datetime_obj = datetime.datetime.utcfromtimestamp(ts)
+            datetime_obj = datetime.utcfromtimestamp(ts)
         elif isinstance(datetime_obj, pd.Timestamp):
             datetime_obj = datetime_obj.to_pydatetime()
-        elif isinstance(datetime_obj, datetime.datetime):
+        elif isinstance(datetime_obj, datetime):
             pass
         elif isinstance(datetime_obj, str):
             str_rep = ModelTime._get_datetime_string_format(datetime_obj)
-            datetime_obj = datetime.datetime.strptime(datetime_obj, str_rep)
+            datetime_obj = datetime.strptime(datetime_obj, str_rep)
 
         else:
             raise NotImplementedError(
@@ -487,7 +495,9 @@ class ModelTime:
 
         return datetime_obj
 
-    def get_elapsed_time(self, kper, kstp=None, start=False):
+    def get_elapsed_time(
+        self, kper: int, kstp: int | None = None, start: bool = False
+    ) -> float:
         """
         Method to get the total simulation time at the end or beginning of a given
         stress-period or stress-period and time-step combination
@@ -525,7 +535,9 @@ class ModelTime:
 
         return self._totim_dict[(kper, kstp)]
 
-    def get_datetime(self, kper, kstp=None, start=False):
+    def get_datetime(
+        self, kper: int, kstp: int | None = None, start: bool = False
+    ) -> datetime:
         """
         Method to get the datetime at the end or start of a given stress period or
         stress period and time step combination
@@ -542,7 +554,7 @@ class ModelTime:
 
         Returns
         -------
-            datetime.datetime object
+            datetime object
         """
         if self.time_units == "unknown":
             raise AssertionError(
@@ -568,7 +580,12 @@ class ModelTime:
 
         return self._datetime_dict[(kper, kstp)]
 
-    def intersect(self, datetime_obj=None, totim=None, forgive=False):
+    def intersect(
+        self,
+        datetime_obj: str | datetime | np.datetime64 | pd.Timestamp | None = None,
+        totim: float | None = None,
+        forgive: bool = False,
+    ) -> tuple[int | None, int | None]:
         """
         Method to intersect a datetime or totim value with the model and
         get the model stress-period and time-step associated with that
@@ -620,7 +637,7 @@ class ModelTime:
                 if calendar.isleap(datetime_obj.year):
                     ndays = 365
 
-                dt_iyear = datetime.datetime(
+                dt_iyear = datetime(
                     datetime_obj.year,
                     self.start_datetime.month,
                     self.start_datetime.day,
@@ -646,17 +663,14 @@ class ModelTime:
             if forgive:
                 return None, None
             if datetime_obj is None:
-                msg = (
-                    f"supplied totim {totim} is outside of model's "
-                    f"time domain 0 - {self.totim[-1]}"
-                )
+                msg = f"totim {totim} outside of time domain 0 - {self.totim[-1]}"
             else:
                 end_dt = self.get_datetime(self.nper - 1, self.nstp[-1] - 1)
                 msg = (
                     f"supplied datetime"
-                    f" {datetime_obj.strftime(self.__str_format)} is "
+                    f" {datetime_obj.strftime(self._str_format)} is "
                     f"outside of the model's time domain "
-                    f"{self.start_datetime.strftime(self.__str_format)} - "
+                    f"{self.start_datetime.strftime(self._str_format)} - "
                     f"{end_dt}"
                 )
             raise ValueError(msg)
@@ -668,8 +682,12 @@ class ModelTime:
 
     @classmethod
     def from_perioddata(
-        cls, perioddata, time_units=None, start_datetime=None, steady_state=None
-    ):
+        cls,
+        perioddata: np.recarray | dict | pd.DataFrame,
+        time_units: int | str | None = None,
+        start_datetime: str | datetime | np.datetime64 | pd.Timestamp | None = None,
+        steady_state: ArrayLike | None = None,
+    ) -> "ModelTime":
         """
         Instantiate a ModelTime class from a TDIS perioddata array.
 
@@ -713,7 +731,7 @@ class ModelTime:
         )
 
     @classmethod
-    def from_headers(cls, headers: np.recarray):
+    def from_headers(cls, headers: np.recarray) -> "ModelTime":
         """
         Instantiate a ModelTime class from a head or budget file header array.
 
@@ -768,7 +786,7 @@ class ModelTime:
 
         return cls(perlen.values(), nstp.values(), tsmult.values())
 
-    def reverse(self):
+    def reverse(self) -> "ModelTime":
         """
         Get a new instance with stress periods and time steps in reverse order.
 

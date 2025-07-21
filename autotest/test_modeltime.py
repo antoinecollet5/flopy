@@ -25,8 +25,7 @@ from flopy.utils.binaryfile import HeadFile
 def test_date_userinput_parsing(dt_rep):
     valid = datetime.datetime(2024, 11, 12)
     dt_obj = ModelTime.parse_datetime(dt_rep)
-    if dt_obj != valid:
-        raise AssertionError("datetime not properly determined from user input")
+    assert dt_obj == valid, "datetime not properly determined from user input"
 
 
 @pytest.mark.parametrize(
@@ -44,8 +43,7 @@ def test_date_userinput_parsing(dt_rep):
 def test_datetime_userinput_parsing(dt_rep):
     valid = datetime.datetime(2024, 11, 12, 14, 31, 29)
     dt_obj = ModelTime.parse_datetime(dt_rep)
-    if dt_obj != valid:
-        raise AssertionError("datetime not properly determined from user input")
+    assert dt_obj == valid, "datetime not properly determined from user input"
 
 
 @pytest.mark.parametrize(
@@ -88,11 +86,8 @@ def test_set_datetime_and_units():
     mt.time_units = new_units
     mt.start_datetime = new_dt
 
-    if mt.time_units != new_units:
-        raise AssertionError("time_units setting not behaving properly")
-
-    if mt.start_datetime != new_dt:
-        raise AssertionError("start_datetime setting not behaving properly")
+    assert mt.time_units == new_units, "time_units setting not behaving properly"
+    assert mt.start_datetime == new_dt, "start_datetime setting not behaving properly"
 
 
 @pytest.mark.parametrize(
@@ -113,8 +108,9 @@ def test_get_elapsed_time_from_kper_kstp(kperkstp, totim0):
 
     kper, kstp = kperkstp
     totim = mt.get_elapsed_time(kper, kstp=kstp)
-    if np.abs(totim - totim0) > 0.01:
-        raise AssertionError("Incorrect totim calculation from get_elapsed_time()")
+    assert np.abs(totim - totim0) <= 0.01, (
+        "Incorrect totim calculation from get_elapsed_time()"
+    )
 
 
 @pytest.mark.parametrize(
@@ -141,8 +137,43 @@ def test_get_datetime_from_kper_kstp(kperkstp, dt0):
     kper, kstp = kperkstp
     dt = mt.get_datetime(kper, kstp=kstp)
     td = dt - dt0
-    if np.abs(td.seconds) > 2:
-        raise AssertionError("Datetime calculation incorrect for get_datetime()")
+    assert np.abs(td.seconds) <= 2, "Datetime calculation incorrect for get_datetime()"
+
+
+def test_init_with_scalars():
+    perlen = 1.0
+    nstp = 4
+    tsmult = 1.0
+    start_datetime = "2023-12-31t23:59:59"
+    time_unit = "days"
+
+    mt = ModelTime(
+        perlen, nstp, tsmult, time_units=time_unit, start_datetime=start_datetime
+    )
+
+    assert mt.perlen[0] == perlen
+    assert mt.nstp[0] == nstp
+    assert mt.tsmult[0] == tsmult
+
+
+def test_check_equality():
+    nper = 2
+    perlen = np.full((nper,), 2.0)
+    nstp = np.full((nper,), 5, dtype=int)
+    tsmult = np.full((nper,), 1.25)
+    start_datetime = "2023-12-31t23:59:59"
+    time_unit = "days"
+
+    mt1 = ModelTime(
+        perlen, nstp, tsmult, time_units=time_unit, start_datetime=start_datetime
+    )
+    mt2 = ModelTime(
+        perlen, nstp, tsmult, time_units=time_unit, start_datetime=start_datetime
+    )
+
+    assert mt1 == mt2, "Equality check false negative"
+    mt1.start_datetime = "2024-01-01T00:00:00"
+    assert mt1 != mt2, "Equality check false positive"
 
 
 @pytest.mark.parametrize(
